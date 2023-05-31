@@ -7,21 +7,57 @@ from torch.optim.lr_scheduler import LambdaLR
 
 class Flatten(nn.Module):
     r"""Reshapes the input tensor as a 2d tensor, where the size of the first (batch) dimension is preserved.
+
     Inputs:
         - **inputs** (batch, num_dim1, num_dim1,...): tensor containing input features
+
     Outputs:
         - **outputs** (batch, num_dim1*num_dim2*...): tensor containing the output
     """
-
     def __init__(self):
         super(Flatten, self).__init__()
 
     def forward(self, inputs):
         return inputs.view(inputs.size(0), -1)
 
+def store_momentums(model, init_vals):
+   
+    momentum_dict = {}
+    for i,m in enumerate(model):
+        if hasattr(m, 'has_codes') and getattr(m, 'has_codes'):
+            momentum_dict[str(i)+".weight_m"] = torch.zeros(m.weight.shape, dtype=torch.double)
+            momentum_dict[str(i)+".weight_v"] = torch.zeros(m.weight.shape, dtype=torch.double)
+            if m.bias!=None:
+                momentum_dict[str(i)+".bias_m"] = torch.zeros(m.bias.shape, dtype=torch.double)
+                momentum_dict[str(i)+".bias_v"] = torch.zeros(m.bias.shape, dtype=torch.double)
+               
+            momentum_dict[str(i)+".b_t"] = torch.zeros(m.weight.shape, dtype=torch.double)
+
+            momentum_dict[str(i)+".layer_step"] = 0
+            momentum_dict[str(i)+".code_step"] = 0
+
+    #last layer 
+    for m in model[-1]:
+        if isinstance(m,nn.Linear):
+            momentum_dict["-1.weight_m"] = torch.zeros(m.weight.shape, dtype=torch.double)
+            momentum_dict["-1.weight_v"] = torch.zeros(m.weight.shape, dtype=torch.double)
+            if m.bias!=None:
+                momentum_dict["-1.bias_m"] = torch.zeros(m.bias.shape, dtype=torch.double)
+                momentum_dict["-1.bias_v"] = torch.zeros(m.bias.shape, dtype=torch.double)
+
+            momentum_dict["-1.layer_step"] = 0
+            
+
+
+    if not init_vals:
+        for key in momentum_dict:
+            momentum_dict[key] = 0
+    return momentum_dict
+
 
 def compute_codes_loss(codes, nmod, lin, loss_fn, codes_targets, mu, lambda_c):
     r"""Function that computes the code loss
+
     Inputs:
         - **codes** (batch, num_features): outputs of the linear modules
         - **nmod** (nn.Module): non-linear module downstream from linear module
@@ -34,13 +70,14 @@ def compute_codes_loss(codes, nmod, lin, loss_fn, codes_targets, mu, lambda_c):
     """
     output = lin(nmod(codes))
     loss = (1/mu)*loss_fn(output) + F.mse_loss(codes, codes_targets)
-    if lambda_c > 0.0:
+    if lambda_c>0.0:
         loss += (lambda_c/mu)*codes.abs().mean()
     return loss
 
 
 def update_memory(As, Bs, inputs, codes, model_mods, eta=0.0):
     r"""Updates the bookkeeping matrices using codes as in Mairal et al. (2009)
+
     Inputs:
         - **As** (list): list of codes autocovariance matrices
         - **Bs** (list): list of cross-covariance matrices between codes and model outputs
@@ -48,6 +85,7 @@ def update_memory(As, Bs, inputs, codes, model_mods, eta=0.0):
         - **codes** (batch, num_features): tensor of codes (i.e. intermediate layer activations)
         - **model_mods** (list): list of model modules
         - **eta** (scalar): linear filtering factor
+
     Outputs:
         - **As** (list): list of updated codes autocovariance matrices
         - **Bs** (list): list of updated cross-covariance matrices between codes and model outputs
@@ -58,13 +96,12 @@ def update_memory(As, Bs, inputs, codes, model_mods, eta=0.0):
         x = inputs
 
     with torch.no_grad():
-        id_codes = [i for i, m in enumerate(model_mods) if hasattr(
-            m, 'has_codes') and getattr(m, 'has_codes')]
+        id_codes = [i for i,m in enumerate(model_mods) if hasattr(m, 'has_codes') and getattr(m, 'has_codes')]
         for i, (idx, c_in, c_out) in enumerate(zip(id_codes, [x]+codes[:-1], codes)):
             try:
                 nmod = model_mods[idx-1]
             except IndexError:
-                def nmod(x): return x
+                nmod = lambda x: x
 
             a = nmod(c_in)
             if eta == 0.0:
@@ -79,11 +116,9 @@ def update_memory(As, Bs, inputs, codes, model_mods, eta=0.0):
 def update_hidden_weights_bcd_(model_mods, As, Bs, lambda_w, max_iter=1):
     r"""Use BCD to update weights of intermediate modules
     """
-    id_codes = [i for i, m in enumerate(model_mods) if hasattr(
-        m, 'has_codes') and getattr(m, 'has_codes')]
+    id_codes = [i for i,m in enumerate(model_mods) if hasattr(m, 'has_codes') and getattr(m, 'has_codes')]
     for i, A, B in zip(id_codes, As, Bs):
-        model_mods[i].weight.data = BCD(
-            model_mods[i].weight.data, A, B, lambda_w, max_iter=max_iter)
+        model_mods[i].weight.data = BCD(model_mods[i].weight.data, A, B, lambda_w, max_iter=max_iter)
 
 
 def BCD(w, A, B, lambda_w, eps=1e-3, max_iter=20, return_errors=False):
@@ -99,13 +134,13 @@ def BCD(w, A, B, lambda_w, eps=1e-3, max_iter=20, return_errors=False):
             w_pre = w.clone()
             error = 0
             for j in range(A.shape[1]):
-                delta_j = (B[:, j] - w.mv(A[:, j]))
-                w[:, j].add_(delta_j)
+                delta_j = (B[:,j] - w.mv(A[:,j]))
+                w[:,j].add_(delta_j)
                 #  u_j /= max(u_j.norm(), 1.0) # This was in Mairal2009, but assumes that B has spectral radius smaller than A
                 # Shrinkage step (sparsity regularizer)
                 if lambda_w > 0.0:
-                    sign_w = w[:, j].sign()
-                    w[:, j].abs_().add_(-lambda_w).clamp_(min=0.0).mul_(sign_w)
+                    sign_w = w[:,j].sign()
+                    w[:,j].abs_().add_(-lambda_w).clamp_(min=0.0).mul_(sign_w)
                 error += delta_j.abs().mean().item()
             errors.append(error)
             # Converged is there is no change between steps
@@ -175,8 +210,7 @@ def get_mods(model, optimizer=None, optimizer_params={}, scheduler=None, data_pa
     insert_mod(model_mods, lmod, has_codes=True)
 
     # Last layer that generates codes is lumped together with adjacent modules to produce the last layer
-    id_codes = [i for i, m in enumerate(model_mods) if hasattr(
-        m, 'has_codes') and getattr(m, 'has_codes')]
+    id_codes = [i for i,m in enumerate(model_mods) if hasattr(m, 'has_codes') and getattr(m, 'has_codes')]
 
     model_tmp = model_mods[:id_codes[-2]+1]
     model_tmp.add_module(str(len(model_tmp)), model_mods[id_codes[-2]+1:])
@@ -187,14 +221,12 @@ def get_mods(model, optimizer=None, optimizer_params={}, scheduler=None, data_pa
         # Include an optimizer in modules with codes
         for m in model_mods:
             if m.has_codes:
-                m.optimizer = getattr(optim, optimizer)(
-                    m.parameters(), **optimizer_params)
+                m.optimizer = getattr(optim, optimizer)(m.parameters(), **optimizer_params)
                 if scheduler is not None:
                     m.scheduler = LambdaLR(m.optimizer, lr_lambda=scheduler)
 
         # Add optimizer to the last layer
-        model_mods[-1].optimizer = getattr(optim, optimizer)(
-            model_mods[-1].parameters(), **optimizer_params)
+        model_mods[-1].optimizer = getattr(optim, optimizer)(model_mods[-1].parameters(), **optimizer_params)
         if scheduler is not None:
             m.scheduler = LambdaLR(m.optimizer, lr_lambda=scheduler)
 
@@ -205,7 +237,7 @@ def get_mods(model, optimizer=None, optimizer_params={}, scheduler=None, data_pa
 
 
 def data_parallel_mods_(model_mods):
-    for i, m in enumerate(model_mods):
+    for i,m in enumerate(model_mods):
         model_mods[i] = torch.nn.DataParallel(m)
         model_mods[i].has_codes = m.has_codes
         if hasattr(m, 'optimizer'):
@@ -233,8 +265,7 @@ def get_codes(model_mods, inputs):
 
 
 def update_codes(codes, model_mods, targets, criterion, mu, lambda_c, n_iter, lr):
-    id_codes = [i for i, m in enumerate(model_mods) if hasattr(
-        m, 'has_codes') and getattr(m, 'has_codes')]
+    id_codes = [i for i,m in enumerate(model_mods) if hasattr(m, 'has_codes') and getattr(m, 'has_codes')]
     for l in range(1, len(codes)+1):
         idx = id_codes[-l]
 
@@ -243,27 +274,26 @@ def update_codes(codes, model_mods, targets, criterion, mu, lambda_c, n_iter, lr
         codes_initial = codes[-l].clone()
 
         if idx+1 in id_codes:
-            def nmod(x): return x
+            nmod = lambda x: x
             lin = model_mods[idx+1]
         else:
             try:
                 nmod = model_mods[idx+1]
             except IndexError:
-                def nmod(x): return x
+                nmod = lambda x: x
             try:
                 lin = model_mods[idx+2]
             except IndexError:
-                def lin(x): return x
+                lin = lambda x: x
 
         if l == 1:  # last layer
-            def loss_fn(x): return criterion(x, targets)
+            loss_fn = lambda x: criterion(x, targets)
         else:       # intermediate layers
-            def loss_fn(x): return mu*F.mse_loss(x, codes[-l+1].detach())
+            loss_fn = lambda x: mu*F.mse_loss(x, codes[-l+1].detach())
 
         for it in range(n_iter):
             optimizer.zero_grad()
-            loss = compute_codes_loss(
-                codes[-l], nmod, lin, loss_fn, codes_initial, mu, lambda_c)
+            loss = compute_codes_loss(codes[-l], nmod, lin, loss_fn, codes_initial, mu, lambda_c)
             loss.backward()
             optimizer.step()
 
@@ -280,8 +310,7 @@ def update_last_layer_(mod_out, inputs, targets, criterion, n_iter):
 
 
 def update_hidden_weights_adam_(model_mods, inputs, codes, lambda_w, n_iter):
-    id_codes = [i for i, m in enumerate(model_mods) if hasattr(
-        m, 'has_codes') and getattr(m, 'has_codes')]
+    id_codes = [i for i,m in enumerate(model_mods) if hasattr(m, 'has_codes') and getattr(m, 'has_codes')]
 
     if hasattr(model_mods, 'n_inputs'):
         x = inputs.view(-1, model_mods.n_inputs)
@@ -293,7 +322,7 @@ def update_hidden_weights_adam_(model_mods, inputs, codes, lambda_w, n_iter):
         if idx >= 1 and not idx-1 in id_codes:
             nmod = model_mods[idx-1]
         else:
-            def nmod(x): return x
+            nmod = lambda x: x
 
         for it in range(n_iter):
             lin.optimizer.zero_grad()
@@ -314,8 +343,7 @@ def scheduler_step(model_mods):
 # Non-diff
 # ------------------------------------------------------------------------
 def update_hidden_weights_nondiff_(model_mods, inputs, codes, lambda_w, n_iter):
-    id_codes = [i for i, m in enumerate(model_mods) if hasattr(
-        m, 'has_codes') and getattr(m, 'has_codes')]
+    id_codes = [i for i,m in enumerate(model_mods) if hasattr(m, 'has_codes') and getattr(m, 'has_codes')]
 
     if hasattr(model_mods, 'n_inputs'):
         x = inputs.view(-1, model_mods.n_inputs)
@@ -327,7 +355,7 @@ def update_hidden_weights_nondiff_(model_mods, inputs, codes, lambda_w, n_iter):
         if idx >= 1 and not idx-1 in id_codes:
             nmod = model_mods[idx-1]
         else:
-            def nmod(x): return x
+            nmod = lambda x: x
 
         for it in range(n_iter):
             lin.optimizer.zero_grad()
@@ -340,17 +368,16 @@ def update_hidden_weights_nondiff_(model_mods, inputs, codes, lambda_w, n_iter):
             lin.optimizer.step()
 
 
+
 def get_mods_nondiff(model, optimizer=None, optimizer_params={}, scheduler=None, data_parallel=False):
-    model_mods = get_mods(model, optimizer=optimizer,
-                          optimizer_params=optimizer_params, scheduler=scheduler, data_parallel=False)
+    model_mods = get_mods(model, optimizer=optimizer, optimizer_params=optimizer_params, scheduler=scheduler, data_parallel=False)
     model_ret = model_mods[:-1]
     for mod in model_mods[-1]:
         model_ret.add_module(str(len(model_ret)), mod)
 
     # Add optimizer to last layer
     model_mods[-1].has_codes = False
-    model_mods[-1].optimizer = getattr(optim, optimizer)(
-        model_mods[-1].parameters(), **optimizer_params)
+    model_mods[-1].optimizer = getattr(optim, optimizer)(model_mods[-1].parameters(), **optimizer_params)
     if scheduler is not None:
         m.scheduler = LambdaLR(m.optimizer, lr_lambda=scheduler)
 
@@ -361,8 +388,7 @@ def get_mods_nondiff(model, optimizer=None, optimizer_params={}, scheduler=None,
 
 
 def update_codes_nondiff(codes, model_mods, targets, criterion, mu, lambda_c, n_iter, lr):
-    id_codes = [i for i, m in enumerate(model_mods) if hasattr(
-        m, 'has_codes') and getattr(m, 'has_codes')]
+    id_codes = [i for i,m in enumerate(model_mods) if hasattr(m, 'has_codes') and getattr(m, 'has_codes')]
     for l in range(1, len(codes)+1):
         idx = id_codes[-l]
 
@@ -375,23 +401,20 @@ def update_codes_nondiff(codes, model_mods, targets, criterion, mu, lambda_c, n_
             try:
                 lin = model_mods[idx+2]
             except IndexError:
-                def lin(x): return x
-
-            def loss_fn(x): return criterion(x, targets)
+                lin = lambda x: x
+            loss_fn = lambda x: criterion(x, targets)
         else:       # intermediate layers
             idx_next = id_codes[-l+1]
 
             nmod = model_mods[idx+1:idx_next]
             lin = model_mods[idx_next]
 
-            # + 1.0*torch.min(F.relu(1+x), F.relu(1-x)).mean()
-            def loss_fn(x): return mu*F.mse_loss(x, codes[-l+1].detach())
+            loss_fn = lambda x: mu*F.mse_loss(x, codes[-l+1].detach())# + 1.0*torch.min(F.relu(1+x), F.relu(1-x)).mean()
             #+ 0.1*(torch.min(x.abs(), (1-x).abs())).mean()
 
         for it in range(n_iter):
             optimizer.zero_grad()
-            loss = compute_codes_loss(
-                codes[-l], nmod, lin, loss_fn, codes_initial, mu, lambda_c)
+            loss = compute_codes_loss(codes[-l], nmod, lin, loss_fn, codes_initial, mu, lambda_c)
             loss.backward()
             optimizer.step()
 
