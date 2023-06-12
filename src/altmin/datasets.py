@@ -2,7 +2,7 @@ import torch
 from torchvision import datasets, transforms
 
 
-def load_dataset(namedataset='mnist', batch_size=200, data_augmentation=False, conv_net=False, num_workers=1):
+def load_dataset(namedataset='mnist', batch_size=200, data_augmentation=False, conv_net=False, num_workers=1, shuffle=True):
     '''data_augmentation: use data augmentation, if it is available for dataset
        conv_net: set to `True` if the dataset is being used with a conv net (i.e. the inputs have to be 3d tensors and not flattened)
     '''
@@ -22,10 +22,10 @@ def load_dataset(namedataset='mnist', batch_size=200, data_augmentation=False, c
         transform = transforms.Compose(transform_list)
 
         trainset = datasets.MNIST(DIR_DATASET, train=True, download=True, transform=transform)
-        train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+        train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
 
         testset = datasets.MNIST(DIR_DATASET, train=False, transform=transform)
-        test_loader = torch.utils.data.DataLoader(testset, batch_size=200, shuffle=True, num_workers=num_workers)
+        test_loader = torch.utils.data.DataLoader(testset, batch_size=200, shuffle=shuffle, num_workers=num_workers)
 
         classes = tuple(range(10))
         n_inputs = 784

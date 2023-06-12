@@ -8,6 +8,7 @@ src/altmin/datasets.py
 src/altmin/models.py
 src/altmin/run_adam_baseline.py
 src/altmin/run_altmin_sgd.py
+src/altmin/utils.py
 src/altmin.egg-info/PKG-INFO
 src/altmin.egg-info/SOURCES.txt
 src/altmin.egg-info/dependency_links.txt
